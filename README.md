@@ -9,4 +9,4 @@
 
 This problem set involves classification of toxic comments in Wikipedia talk pages.
 
-Your task is to use what you have learned in class to build a classifier that performs well on a test set with the true labels obfuscated to prevent cheating. All of the comments were hand-labeled by multiple coders for the paper [\color{blue} "Ex Machina: Personal Attacks Seen at Scale"](https://arxiv.org/abs/1610.08914).
+Your task is to use what you have learned in class to build a classifier that performs well on a test set with the true labels obfuscated to prevent cheating. All of the comments were hand-labeled by multiple coders for the paper ["Ex Machina: Personal Attacks Seen at Scale"](https://arxiv.org/abs/1610.08914).
