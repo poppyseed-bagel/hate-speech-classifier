@@ -1,0 +1,547 @@
+---
+title: "Classification Competition Code"
+date: |
+  | `r format(Sys.time(), '%d %B %Y')`
+output:
+  html_document:
+    df_print: paged
+---
+
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(glmnet)
+library(tidytext)
+library(tidyverse)
+library(quanteda)
+library(quanteda.textplots)
+library(quanteda.textstats)
+library(quanteda.textmodels)
+library(quanteda.classifiers)
+library(caret)
+library(randomForest)
+library(MLmetrics)
+library(janitor)
+library(tidytext)
+library(CORElearn)
+library(Rborist)
+
+set.seed(1)
+```
+
+# Pre-processing
+```{r tokenisation, message=FALSE, warning=FALSE}
+set.seed(1)
+
+# Load data
+#download.file('https://github.com/lse-my474/pset_data/raw/main/coms_tr.csv', 'coms_tr.csv')
+#download.file('https://github.com/lse-my474/pset_data/raw/main/coms_te.csv', 'coms_te.csv')
+coms_te <- read.csv('coms_te.csv', stringsAsFactors = F)
+coms_tr <- read.csv('coms_tr.csv', stringsAsFactors = F)
+
+coms_tr %>%
+  group_by(toxic) %>%
+  summarise(count = n())
+
+# wrangle for compatibility 
+coms_te$sample <- rep('test', nrow(coms_te))
+coms_te$toxic <- rep(NA, nrow(coms_te))
+coms_tr$sample <- rep('train', nrow(coms_tr))
+
+# Create full df
+data <- rbind(coms_tr, coms_te)
+
+# Create Corpus
+corpus <- corpus(data, text_field="comment")
+
+############# Create tokens
+
+# 1 to 3 word n-grams. Vastly increases sparseness as data as p increases, so must be aware of this when selecting a model. 
+# all to lower for matching, removing stopwords.
+# manual_words vector refers to words that appear in both toxic and non-toxic posts and can not be used to identify either. 
+
+manual_words <- c('page', 'edit', 'wikipedia', 'like', 'articl', 'just','use')
+
+toks_ngrams <-  tokens(corpus, remove_punct = TRUE)%>%
+  tokens_tolower() %>%
+  tokens_remove(pattern = c(stopwords("english"), c("=","`", "~", "|", ":")), padding = FALSE) %>%
+  tokens(remove_punct = TRUE, remove_numbers = TRUE, remove_symbols = TRUE) %>%
+  tokens_wordstem(language = quanteda_options("language_stemmer")) %>%
+  tokens_remove(manual_words, padding = TRUE) %>%
+  tokens_ngrams(1:2)
+
+############# Create dfm
+
+# initialising df 
+dfm_draft <- dfm(toks_ngrams)
+
+# set word frequency limit on dfm to trim to most relevant features (selection). 
+dfm_trimmed <- dfm_trim(dfm_draft, min_docfreq = 75)
+
+# final dfm
+dfm_final <- dfm_trimmed
+```
+
+# Feature Selection with TF-IDF
+```{r tfidf, warning=FALSE}
+set.seed(1)
+
+tfidf_data <- dfm_tfidf(dfm_final, scheme_tf = 'prop')
+
+tfidf_col_means <- colMeans(tfidf_data)
+
+hist(tfidf_col_means, breaks = 40, main = "Distribution of Column Means", xlab = "Column Means")
+
+zero_tfidf <- which(tfidf_col_means <= 0.0001)
+
+length(zero_tfidf)
+
+zero_tfidf_names = names(zero_tfidf)
+
+paste("There are", ncol(dfm_final), "features before filtering via tfidf.")
+
+# removing obsolete tokens
+dfm_final <- dfm_final %>%
+  dfm_remove(pattern = zero_tfidf_names)
+
+# removing tokens beginning with numbers
+manual_words_2 <- c("2nd", "wp:ani")
+
+dfm_final <- dfm_final %>%
+  dfm_remove(pattern = manual_words_2)
+
+paste("There are", ncol(dfm_final), "features after filtering via tfidf.")
+
+############# Create test and train dfm sets.
+train_dfm <- dfm_final[dfm_final$sample == 'train',]
+test_dfm <- dfm_final[dfm_final$sample == 'test',]
+
+```
+
+# Feature Selection and Modelling with LASSO
+```{r lasso, warning=FALSE}
+set.seed(1)
+
+# nlambda = 200 rather than 101, increases certainty that this lambda is proper minimum - this is a surrogate learning rate.
+lasso_cv <- cv.glmnet(x = train_dfm,
+                   y = docvars(train_dfm)$toxic,
+                   family="binomial",
+                   alpha=1,
+                   nfolds=5,
+                   nlambda = 200,
+                   maxit = 10000)
+
+plot(lasso_cv)
+
+# CV Error
+# Value of Lambda that minimises CV error  
+paste("The value of lambda that minimises CV error (MSE) is", lasso_cv$lambda.min, "at index", which.min(lasso_cv$cvm))
+paste("The value of lambda that is 1 standard deviation away from the optimum lambda value is", lasso_cv$lambda.1se)
+paste("The optimum CV error MSE is", 1 - lasso_cv$cvm[which(lasso_cv$lambda == lasso_cv$lambda.min)])
+
+# Predicting in test set
+lasso_test_preds <- predict(lasso_cv, test_dfm, type = "class")
+
+lasso_test_preds %>%
+  as.data.frame() %>%
+  group_by(lambda.1se) %>%
+  summarise(count = n())
+
+# Writng File for Kaggle Submission
+lasso_answers <- cbind(coms_te$rev_id, lasso_test_preds)
+colnames(lasso_answers) <- c('rev_id', 'toxic')
+write.csv(lasso_answers, 'lasso_answers.csv', row.names=FALSE)
+
+# Creating CSV for feature selection
+best.lambda <- which(lasso_cv$lambda==lasso_cv$lambda.1se)
+
+beta <- lasso_cv$glmnet.fit$beta[,best.lambda]
+
+## identifying predictive features
+lasso_betas <- data.frame(coef = as.numeric(beta),
+				word = names(beta), stringsAsFactors=F)
+
+lasso_betas <- lasso_betas[order(lasso_betas$coef),]
+
+head(lasso_betas[,c("coef", "word")], n=10)
+
+lasso_betas <- lasso_betas[order(lasso_betas$coef, decreasing=TRUE),]
+
+head(lasso_betas[,c("coef", "word")], n=10)
+
+write.csv(lasso_betas, 'lasso_betas.csv', row.names=FALSE)
+
+lasso_features_to_remove <- lasso_betas %>%
+  filter(coef == 0) %>%
+  select(word) %>%
+  as.vector()
+
+lasso_features_to_remove <- lasso_features_to_remove[[1]]
+
+# LASSO Obsolete feature removal 
+# Removing features where coefs went to 0. 
+
+dfm_final <- dfm_final %>%
+  dfm_remove(pattern = lasso_features_to_remove)
+
+paste("There are", ncol(dfm_final), "features after filtering via LASSO.")
+
+############# Create test and train dfm sets.
+train_dfm <- dfm_final[dfm_final$sample == 'train',]
+test_dfm <- dfm_final[dfm_final$sample == 'test',]
+
+# Toxic vs. Non-toxic
+toxic_dfm <- dfm_final[train_dfm$toxic == 1, ]
+
+```
+
+# Matrix & Data Frame Manipulation
+```{r matrix, warning=FALSE}
+set.seed(1)
+################### Train Data 
+
+# Need to use 'as' because data is so large that other functions dont work
+train_matrix <- as(train_dfm, "Matrix")
+
+colnames(train_matrix) <- colnames(train_dfm)
+
+cols_train_dfm <- as.vector(colnames(train_dfm))
+cols_train_matr <- as.vector(colnames(train_matrix))
+
+#to clear physical memory
+rm(toks_ngrams, dfm_draft, dfm_trimmed, cols_train_dfm, cols_train_matr)
+
+#Matrix to Data Frame manipulation
+
+# First convert to regular matrix 
+train_matrix <- as.matrix(train_matrix)
+
+# doing this for computation reasons
+
+# convert to data frame
+train_df <- as.data.frame(train_matrix)
+
+train_x <- train_df
+
+train_y <- coms_tr$toxic
+
+#add outcome variable to data frame
+train_df<- cbind(train_df, train_y)
+
+train_df <- train_df %>%
+  mutate(train_y = as.factor(train_y))
+
+train_df <- train_df %>%
+  mutate(train_y = factor(train_y, 
+                        labels = make.names(levels(train_y))))
+
+train_df <- clean_names(train_df)
+
+# Checking same length
+identical(dim(train_df)[1],
+length(train_y))
+
+train_y <- factor(train_y)
+
+train_y <- factor(train_y, labels = make.names(levels(train_y)))
+
+# Matrix is too big
+rm(train_matrix)
+
+```
+
+# Toy Dataset
+```{r toy, warning=FALSE}
+# Create 'sample' toy dataset 
+set.seed(1)
+
+sample_index <- sample(1:nrow(train_df), nrow(train_df)/10)
+
+sample_df <- train_df[sample_index,]
+
+sample_x <- train_df[sample_index,] %>%
+  select(-train_y)
+
+sample_y <- train_df[sample_index,] %>%
+  select(train_y) 
+
+# create validation set within train for CV error
+
+validation_index <- sample(1:nrow(train_df), nrow(train_df)/5)
+
+validation_x <- train_df[validation_index,] %>%
+  select(-train_y)
+
+validation_y <- train_df[validation_index,] %>%
+  select(train_y) 
+
+# create train without validation set.
+
+train_train_x <- train_df[-validation_index,] %>%
+  select(-train_y)
+
+train_train_y <- train_df[-validation_index,] %>%
+  select(train_y) 
+
+
+```
+
+# F1 Function
+```{r f1, warning=FALSE}
+
+calculate_f1_score <- function(confusion_matrix) {
+  # Calculate the precision and recall
+  true_positives <- confusion_matrix[2,2]
+  false_positives <- confusion_matrix[1,2]
+  false_negatives <- confusion_matrix[2,1]
+  
+  precision <- true_positives / (true_positives + false_positives)
+  recall <- true_positives / (true_positives + false_negatives)
+  
+  # Calculate the F1 score
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  return(f1_score)
+}
+
+```
+
+# Exploratory Data Analysis
+```{r eda, message=FALSE, warning=FALSE}
+############## Feature Exploration 
+
+textplot_wordcloud(train_dfm, rotation=0.1, random_order = FALSE, min_size= 0.25, max_size=8, min_count = 10, max_words=125, color = "red")
+
+# top features of train dfm
+# Using top features to remove words that are obsolete to prediction because they're common across all comments. 
+topfeatures(train_dfm)
+
+top_feats <- names(topfeatures(fcm(train_dfm), 50))
+
+fcm(train_dfm) %>%
+  fcm_select(pattern = top_feats) %>%
+  textplot_network(min_freq = 15, edge_color = "orange", edge_alpha = 0.8, edge_size = 1)
+
+############## Dispersion/Sparseness
+paste("Approximately", 1 - sparsity(train_dfm), "of our train dfm contains non-zero frequency values, across", ncol(train_dfm), "features.")
+
+# Even though its English Wiki - Are we sure that all the words are 'English' or are there some slang words that aren't recognised as English across texts?
+TTR <- textstat_lexdiv(train_dfm) %>%
+  arrange(TTR) 
+
+paste("The average lexical diversity across our training data is", mean(TTR$TTR, na.rm = TRUE))
+
+################# Exploring Conditionals - Toxic vs. non-Toxic groups
+
+###### Can we do a t.test for difference in means for length of toxic comments vs non-toxic comments?
+
+coms_tr$length <- nchar(coms_tr$comment)
+
+(mean(coms_tr[coms_tr$toxic==1,]$length) - mean(coms_tr[coms_tr$toxic==0,]$length))
+
+toxic_len <- coms_tr$length[coms_tr$toxic == 1]
+
+non_toxic_len <- coms_tr$length[coms_tr$toxic == 0]
+
+t_test_result_len <- t.test(toxic_len, non_toxic_len)
+
+t_test_result_len
+
+# print the p-value
+print(t_test_result_len$p.value)
+
+###### Top Features for Toxic Data
+textplot_wordcloud(toxic_dfm, rotation=0, min_size=.75, max_size=5, max_words=50)
+
+# Much different to top features for full dfm
+topfeatures(toxic_dfm)
+
+rm(coms_tr, zero_tfidf, zero_tfidf_names)
+```
+      
+# Creating Validation Sets
+```{r validation, warning=FALSE}
+set.seed(1)
+
+# Creates tfidf scores on feature selected training set
+tfidf_data <- dfm_tfidf(train_dfm, scheme_tf = 'prop')
+
+# creating train index
+N <- floor(.8*nrow(tfidf_data))
+train_idx <- sample(1:nrow(tfidf_data), N)
+
+# Creating train and test sets
+train_val <- tfidf_data[train_idx,]
+test_val <- tfidf_data[-train_idx,]
+
+toxic_values_train <- docvars(train_val)$toxic
+toxic_values_test <- docvars(test_val)$toxic
+
+```
+
+# Naive Bayes Classifier
+```{r naivebayes, warning=FALSE}
+
+########## Cross Validation of Naive Bayes Classifier for more accurate estimation of test error
+
+# Shuffle training data only
+shuffle_data_indices <- sample(1:nrow(train_dfm))
+
+# Split training data into 10 folds
+split_data_indices <- split(shuffle_data_indices, rep(1:10, length.out = length(train_val)))
+
+# Create empty vector for F1 score
+nb_f1_score <- c()
+
+for (fold in 1:10){
+    
+  #split ONLY training data into respective training & fold sets
+  fold_index <- split_data_indices[[fold]]
+  left_out_fold <- train_dfm[fold_index,]
+  train_group <- train_dfm[-fold_index,]
+  
+  # Train model
+  nb_mod <- textmodel_nb(x = train_group, y = docvars(train_group)$toxic)
+  
+  # predicting labels for validation fold 
+  nb_preds <- predict(nb_mod, newdata = left_out_fold)
+  
+  # computing the confusion matrix
+  (nb_cm <- table(nb_preds, docvars(left_out_fold)$toxic))
+  
+  # Calculate F1 score
+  fold_f1 <- calculate_f1_score(nb_cm)
+  
+  nb_f1_score <- c(nb_f1_score, fold_f1)
+    
+}
+
+# Vector of CV F1 scores
+nb_f1_score
+# Average CV F1 scores over 10 folds
+mean(nb_f1_score)
+
+nb_mod <- textmodel_nb(x = train_dfm, y = docvars(train_dfm)$toxic)
+
+nb_y_preds <- predict(nb_mod, test_dfm, type = "class")
+
+# Output answers for submission to Kaggle
+nb_answers <- cbind(coms_te$rev_id, nb_y_preds)
+colnames(nb_answers) <- c('rev_id', 'toxic')
+write.csv(nb_answers, 'nb_answers.csv', row.names=FALSE)
+
+```
+
+# Support Vector Machine (SVM)
+```{r svm, warning=FALSE}
+############## SVM Cross Validation for Hyperparameter Tuning
+
+# Setting up parameter tuning process with grid search
+evaluation <- textmodel_evaluate(x = train_val, y = toxic_values_train,
+                                 k = 3, seed = 1, 
+                                 parameters = list(cost = c(2, 5, 10), epsilon = c(0.01, 0.05, 0.1)),
+                                 model = "textmodel_svm", fun = "f1_score")
+
+# Assessing Hyperparameter Optimisation Grid Search 
+head(evaluation)
+
+# Finding the best HP value for cost
+cost_hp <- aggregate(evaluation, by = list(evaluation$cost), FUN = "mean")
+cost_hp
+cost_best_idx <- which.max(cost_hp[,'f1_score'])
+
+cost_best <- cost_hp[cost_best_idx,'Group.1']
+cost_best
+
+# Finding the best HP value for epsilon
+eps_hp <- aggregate(evaluation, by = list(evaluation$epsilon), FUN = "mean")
+eps_hp
+
+eps_best_idx <- which.max(eps_hp[,'f1_score'])
+eps_best_idx
+
+eps_best <- eps_hp[eps_best_idx,'Group.1']
+eps_best
+
+
+########### SVM Cross Validation for Estimation of Test Error
+
+svm_f1_scores <- c()
+
+for (fold in 1:4){
+    
+  #split ONLY training data into respective training & fold sets
+  fold_index <- split_data_indices[[fold]]
+  left_out_fold <- train_dfm[fold_index,]
+  train_group <- train_dfm[-fold_index,]
+  
+  # Train model
+  svm_best_mod_cv <- textmodel_svm(x = train_group, y = docvars(train_group)$toxic, 
+                        cost = cost_best, epsilon = eps_best)  
+  
+  # predicting labels for validation fold 
+  svm_y_pred_cv <- predict(svm_best_mod_cv, newdata = left_out_fold, type = "class")
+  
+  # computing the confusion matrix
+  (svm_cm <- table(svm_y_pred_cv, docvars(left_out_fold)$toxic))
+  
+  # Calculate F1 score
+  fold_f1 <- calculate_f1_score(svm_cm)
+  
+  svm_f1_scores <- c(svm_f1_scores, fold_f1)
+    
+}
+
+svm_f1_scores
+mean(svm_f1_scores)
+
+paste("The CV Error for our Optimised SVM model is", mean(svm_f1_scores))
+paste("Our Optimised SVM model has a cost hyperparameter value of", cost_best)
+paste("Our Optimised SVM model has a epsilon hyperparameter value of", eps_best)
+
+########### New model with Optimised HPs
+svm_best_mod <- textmodel_svm(x = train_val, y = toxic_values_train, 
+                        cost = cost_best, epsilon = eps_best)
+
+svm_y_preds <- predict(svm_best_mod, test_dfm, type = "class")
+
+paste("Our optimised SVM model predicts that", sum(svm_y_preds)/length(svm_y_preds), "% of the test set is toxic")
+
+# Output answers for submission to Kaggle
+svm_answers <- cbind(coms_te$rev_id, svm_y_preds)
+colnames(svm_answers) <- c('rev_id', 'toxic')
+write.csv(svm_answers, 'svm_answers.csv', row.names=FALSE)
+
+```
+
+# Random Forest (RF)
+```{r randomforest, warning=FALSE}
+# Training on Sample for Variable Importance
+
+# rf_gridsearch_samp <- randomForest(x = sample_x,  
+#                                   y = sample_y$train_y,
+#                                   ntree = 50,
+#                                   mtry = floor(sqrt(ncol(sample_x))))
+
+# varImpPlot(rf_gridsearch_samp)
+
+# rf_samp_preds <- predict(rf_gridsearch_samp, validation_x)
+
+# confusionMatrix(rf_samp_preds, factor(validation_y$train_y))
+
+# Training on Training data for final Random Forest Model
+# UNABLE TO DO SO DUE TO COMPUTING RESOURCES.
+
+# rf_gridsearch <- randomForest(x = train_train_x, 
+#                              y = train_train_y$train_y, 
+#                              ntree = 50, 
+#                              mtry = floor(sqrt(ncol(train_train_x))))
+
+# varImpPlot(rf_gridsearch)
+
+# Use model to predict in validation set
+# rf_val_preds <- predict(rf_gridsearch, validation_x)
+
+```
+
