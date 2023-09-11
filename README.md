@@ -5,7 +5,7 @@
 ### Assignment write-up alongside code is found in `writeup/writeup.pdf`
 ### For access to code-only version, go to `code/classifier.rmd`
 
-Group project for Applied Machine Learning.
+Group project for Applied Machine Learning. This classifier looks at a dataset of 100,000+ Wikipedia comments which have been pre-labeled as hate speech or not to create an algorithim to identify hate speech in unseen comments. The project required data cleaning, feature selection, and model tuning. The project used 4 different algorithims: LASSO, Random Forest, Support Vector Machines (SVM), and Naive Bayes. We found that the SVM model performed the best, with a CV error of .74 and a test error of .71. 
 
 *Content warning: This competition makes use of data from a project to automate moderation of toxic speech online. Many comments in this dataset contain hate speech and upsetting content.*
 
