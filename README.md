@@ -5,6 +5,8 @@
 ### Assignment write-up alongside code is found in `writeup/writeup.pdf`
 ### For access to code-only version, go to `code/classifier.rmd`
 
+Group project for Applied Machine Learning.
+
 *Content warning: This competition makes use of data from a project to automate moderation of toxic speech online. Many comments in this dataset contain hate speech and upsetting content.*
 
 This problem set involves classification of toxic comments in Wikipedia talk pages.
